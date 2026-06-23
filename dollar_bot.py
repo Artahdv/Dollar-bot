@@ -31,6 +31,7 @@ ALANCHAND_TOKEN = os.environ.get("ALANCHAND_TOKEN", "")
 ALANCHAND_URL = f"https://api.alanchand.com/?type=currencies&token={ALANCHAND_TOKEN}"
 ALANCHAND_GOLD_URL = f"https://api.alanchand.com/?type=golds&token={ALANCHAND_TOKEN}"
 PRICETODAY_URL = "https://api.priceto.day/v1/latest/irr/usd"
+PRICETODAY_EUR_URL = "https://api.priceto.day/v1/latest/irr/eur"
 
 # بعضی سرویس‌ها درخواست‌های بدون User-Agent مرورگر را به‌عنوان بات رد می‌کنند
 REQUEST_HEADERS = {
@@ -51,38 +52,39 @@ def _try_parse_plain_number(text: str):
         return None
 
 
-def _deep_find_usd_price(data):
+def _deep_find_currency_price(data, symbol: str):
     """
-    به‌صورت بازگشتی در هر ساختار JSON دنبال قیمت دلار می‌گردد.
+    به‌صورت بازگشتی در هر ساختار JSON دنبال قیمت یک ارز (مثل usd یا eur) می‌گردد.
     چون فرمت دقیق APIهای مختلف فرق دارد، این تابع چند الگوی رایج را پوشش می‌دهد.
     """
+    symbol = symbol.lower()
     price_keys = ("price", "value", "sell", "rate", "amount", "Price")
 
     if isinstance(data, dict):
         keys_lower = {str(k).lower(): k for k in data.keys()}
 
-        # حالت ۱: کلیدی دقیقاً به اسم usd وجود دارد
-        if "usd" in keys_lower:
-            usd_val = data[keys_lower["usd"]]
-            if isinstance(usd_val, dict):
+        # حالت ۱: کلیدی دقیقاً به اسم ارز وجود دارد (مثلاً usd یا eur)
+        if symbol in keys_lower:
+            val = data[keys_lower[symbol]]
+            if isinstance(val, dict):
                 for pk in price_keys:
-                    for k2 in usd_val:
+                    for k2 in val:
                         if str(k2).lower() == pk.lower():
                             try:
-                                return float(usd_val[k2])
+                                return float(val[k2])
                             except (TypeError, ValueError):
                                 pass
             else:
                 try:
-                    return float(usd_val)
+                    return float(val)
                 except (TypeError, ValueError):
                     pass
 
-        # حالت ۲: این دیکشنری خودش یک آیتم با symbol/name_en برابر usd است
-        symbol = str(
+        # حالت ۲: این دیکشنری خودش یک آیتم با symbol/name_en برابر ارز مدنظر است
+        item_symbol = str(
             data.get("symbol") or data.get("Symbol") or data.get("name_en") or ""
         ).lower()
-        if symbol == "usd":
+        if item_symbol == symbol:
             for pk in price_keys:
                 for k2 in data:
                     if str(k2).lower() == pk.lower():
@@ -93,17 +95,22 @@ def _deep_find_usd_price(data):
 
         # در غیر این صورت، بازگشتی در مقادیر دیگر بگرد
         for v in data.values():
-            result = _deep_find_usd_price(v)
+            result = _deep_find_currency_price(v, symbol)
             if result is not None:
                 return result
 
     elif isinstance(data, list):
         for item in data:
-            result = _deep_find_usd_price(item)
+            result = _deep_find_currency_price(item, symbol)
             if result is not None:
                 return result
 
     return None
+
+
+def _deep_find_usd_price(data):
+    """نگه‌داشته شده برای سازگاری با کدهای قبلی؛ معادل جستجوی usd است."""
+    return _deep_find_currency_price(data, "usd")
 
 
 def _format_price(number: float) -> str:
@@ -203,6 +210,44 @@ def fetch_usd_price() -> str:
     raise RuntimeError(" | ".join(errors))
 
 
+def fetch_eur_price() -> str:
+    errors = []
+
+    # منبع ۱: AlanChand
+    if ALANCHAND_TOKEN:
+        try:
+            resp = requests.get(ALANCHAND_URL, headers=REQUEST_HEADERS, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            price = _deep_find_currency_price(data, "eur")
+            if price:
+                return _format_price(price)
+            errors.append("alanchand: قیمت یورو در پاسخ پیدا نشد")
+        except Exception as e:
+            errors.append(f"alanchand: {e}")
+    else:
+        errors.append("alanchand: ALANCHAND_TOKEN ست نشده")
+
+    # منبع ۲ (پشتیبان): priceto.day
+    try:
+        resp = requests.get(PRICETODAY_EUR_URL, headers=REQUEST_HEADERS, timeout=10)
+        resp.raise_for_status()
+        number = _try_parse_plain_number(resp.text)
+        if number is None:
+            data = resp.json()
+            if isinstance(data, (int, float)):
+                number = float(data)
+            else:
+                number = _deep_find_currency_price(data, "eur")
+        if number:
+            return _format_price(number)
+        errors.append("priceto.day: قیمت یورو در پاسخ پیدا نشد")
+    except Exception as e:
+        errors.append(f"priceto.day: {e}")
+
+    raise RuntimeError(" | ".join(errors))
+
+
 def build_full_report() -> str:
     parts = []
     try:
@@ -215,6 +260,12 @@ def build_full_report() -> str:
         parts.append(f"💵 قیمت دلار = {usd}")
     except Exception:
         logger.exception("خطا در دریافت قیمت دلار (گزارش کامل)")
+
+    try:
+        eur = fetch_eur_price()
+        parts.append(f"💶 قیمت یورو = {eur}")
+    except Exception:
+        logger.exception("خطا در دریافت قیمت یورو (گزارش کامل)")
 
     if not parts:
         return "متاسفانه الان نتونستم قیمت‌ها رو بگیرم. کمی بعد دوباره تلاش کن."
@@ -237,6 +288,17 @@ async def price_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def euro_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        price = fetch_eur_price()
+        await update.message.reply_text(f"💶 قیمت یورو:\n{price}")
+    except Exception:
+        logger.exception("خطا در دریافت قیمت یورو")
+        await update.message.reply_text(
+            "متاسفانه الان نتونستم قیمت یورو رو بگیرم. کمی بعد دوباره تلاش کن."
+        )
+
+
 async def gold_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         text = fetch_gold_prices()
@@ -251,8 +313,9 @@ async def gold_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "سلام! برای دیدن قیمت لحظه‌ای دلار آزاد دستور /price رو بفرست،\n"
+        "برای نرخ یورو دستور /euro رو بفرست،\n"
         "برای نرخ طلا دستور /gold رو بفرست،\n"
-        "یا فقط کلمه «دلار» یا «طلا» رو برام بنویس."
+        "یا فقط کلمه «دلار»، «یورو» یا «طلا» رو برام بنویس."
     )
 
 
@@ -272,6 +335,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if "طلا" in text:
         await gold_command(update, context)
+    elif "یورو" in text:
+        await euro_command(update, context)
     elif "دلار" in text:
         await price_command(update, context)
 
@@ -283,6 +348,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("price", price_command))
+    app.add_handler(CommandHandler("euro", euro_command))
     app.add_handler(CommandHandler("gold", gold_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
