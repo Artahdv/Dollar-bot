@@ -29,6 +29,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "PUT-YOUR-TOKEN-HERE")
 ALANCHAND_TOKEN = os.environ.get("ALANCHAND_TOKEN", "")
 
 ALANCHAND_URL = f"https://api.alanchand.com/?type=currencies&token={ALANCHAND_TOKEN}"
+ALANCHAND_GOLD_URL = f"https://api.alanchand.com/?type=golds&token={ALANCHAND_TOKEN}"
 PRICETODAY_URL = "https://api.priceto.day/v1/latest/irr/usd"
 
 # بعضی سرویس‌ها درخواست‌های بدون User-Agent مرورگر را به‌عنوان بات رد می‌کنند
@@ -109,7 +110,59 @@ def _format_price(number: float) -> str:
     return f"{int(number):,} تومان".replace(",", "،")
 
 
-def fetch_usd_price() -> str:
+def _extract_list_of_items(data):
+    """
+    تلاش می‌کند لیست آیتم‌ها (مثلاً انواع طلا) را از ساختار JSON پیدا کند،
+    چه خودِ پاسخ یک لیست باشد چه داخل یک کلید مثل 'golds' یا 'data' باشد.
+    """
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("golds", "gold", "data", "items", "result"):
+            if key in data and isinstance(data[key], list):
+                return data[key]
+        # اگر هیچ‌کدام نبود، شاید مقادیر دیکشنری خودشان آیتم‌ها باشند
+        if all(isinstance(v, dict) for v in data.values()):
+            return list(data.values())
+    return []
+
+
+def fetch_gold_prices() -> str:
+    if not ALANCHAND_TOKEN:
+        raise RuntimeError("ALANCHAND_TOKEN ست نشده")
+
+    resp = requests.get(ALANCHAND_GOLD_URL, headers=REQUEST_HEADERS, timeout=10)
+    resp.raise_for_status()
+    data = resp.json()
+    items = _extract_list_of_items(data)
+
+    if not items:
+        raise RuntimeError("لیست قیمت طلا در پاسخ پیدا نشد")
+
+    price_keys = ("price", "value", "sell", "rate", "amount", "Price")
+    lines = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name") or item.get("name_fa") or item.get("name_en") or item.get("symbol") or "نامشخص"
+        price = None
+        for pk in price_keys:
+            for k in item:
+                if str(k).lower() == pk.lower():
+                    try:
+                        price = float(item[k])
+                    except (TypeError, ValueError):
+                        pass
+                    break
+            if price is not None:
+                break
+        if price is not None:
+            lines.append(f"🔸 {name}: {_format_price(price)}")
+
+    if not lines:
+        raise RuntimeError("هیچ قیمتی از پاسخ استخراج نشد")
+
+    return "🏆 نرخ انواع طلا:\n\n" + "\n".join(lines)
     errors = []
 
     # منبع ۱: AlanChand (دقیق‌تره، ولی نیاز به توکن رایگان دارد)
@@ -158,15 +211,30 @@ async def price_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def gold_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        text = fetch_gold_prices()
+        await update.message.reply_text(text)
+    except Exception:
+        logger.exception("خطا در دریافت قیمت طلا")
+        await update.message.reply_text(
+            "متاسفانه الان نتونستم قیمت طلا رو بگیرم. کمی بعد دوباره تلاش کن."
+        )
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "سلام! برای دیدن قیمت لحظه‌ای دلار آزاد دستور /price رو بفرست،\n"
-        "یا فقط کلمه «دلار» رو برام بنویس."
+        "برای نرخ طلا دستور /gold رو بفرست،\n"
+        "یا فقط کلمه «دلار» یا «طلا» رو برام بنویس."
     )
 
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if "دلار" in (update.message.text or ""):
+    text = update.message.text or ""
+    if "طلا" in text:
+        await gold_command(update, context)
+    elif "دلار" in text:
         await price_command(update, context)
 
 
@@ -177,6 +245,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("price", price_command))
+    app.add_handler(CommandHandler("gold", gold_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
     logger.info("بات در حال اجراست...")
