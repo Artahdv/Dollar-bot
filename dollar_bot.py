@@ -20,7 +20,7 @@ import os
 import logging
 import requests
 from telegram import Update, MessageEntity, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -33,6 +33,7 @@ ALANCHAND_GOLD_URL = f"https://api.alanchand.com/?type=golds&token={ALANCHAND_TO
 PRICETODAY_URL = "https://api.priceto.day/v1/latest/irr/usd"
 PRICETODAY_EUR_URL = "https://api.priceto.day/v1/latest/irr/eur"
 PRICETODAY_IQD_URL = "https://api.priceto.day/v1/latest/irr/iqd"
+PRICETODAY_KWD_URL = "https://api.priceto.day/v1/latest/irr/kwd"
 
 # بعضی سرویس‌ها درخواست‌های بدون User-Agent مرورگر را به‌عنوان بات رد می‌کنند
 REQUEST_HEADERS = {
@@ -290,6 +291,45 @@ def fetch_iqd_price() -> str:
     raise RuntimeError(" | ".join(errors))
 
 
+def fetch_kwd_price() -> str:
+    """دینار کویت برخلاف عراق، ارزش بالایی دارد (در حد چند برابر دلار)، پس به‌ازای ۱ دینار حساب می‌شود."""
+    errors = []
+
+    # منبع ۱: AlanChand
+    if ALANCHAND_TOKEN:
+        try:
+            resp = requests.get(ALANCHAND_URL, headers=REQUEST_HEADERS, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            price = _deep_find_currency_price(data, "kwd")
+            if price:
+                return _format_price(price)
+            errors.append("alanchand: قیمت دینار کویت در پاسخ پیدا نشد")
+        except Exception as e:
+            errors.append(f"alanchand: {e}")
+    else:
+        errors.append("alanchand: ALANCHAND_TOKEN ست نشده")
+
+    # منبع ۲ (پشتیبان): priceto.day
+    try:
+        resp = requests.get(PRICETODAY_KWD_URL, headers=REQUEST_HEADERS, timeout=10)
+        resp.raise_for_status()
+        number = _try_parse_plain_number(resp.text)
+        if number is None:
+            data = resp.json()
+            if isinstance(data, (int, float)):
+                number = float(data)
+            else:
+                number = _deep_find_currency_price(data, "kwd")
+        if number:
+            return _format_price(number)
+        errors.append("priceto.day: قیمت دینار کویت در پاسخ پیدا نشد")
+    except Exception as e:
+        errors.append(f"priceto.day: {e}")
+
+    raise RuntimeError(" | ".join(errors))
+
+
 def build_keyboard(context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardMarkup:
     username = context.bot.username
     return InlineKeyboardMarkup([
@@ -322,6 +362,12 @@ def build_full_report() -> str:
         parts.append(f"🇮🇶 قیمت دینار عراق = {iqd}")
     except Exception:
         logger.exception("خطا در دریافت قیمت دینار عراق (گزارش کامل)")
+
+    try:
+        kwd = fetch_kwd_price()
+        parts.append(f"🇰🇼 قیمت دینار کویت = {kwd}")
+    except Exception:
+        logger.exception("خطا در دریافت قیمت دینار کویت (گزارش کامل)")
 
     if not parts:
         return "متاسفانه الان نتونستم قیمت‌ها رو بگیرم. کمی بعد دوباره تلاش کن."
@@ -372,6 +418,53 @@ async def iqd_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def kwd_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        price = fetch_kwd_price()
+        await update.message.reply_text(
+            f"🇰🇼 قیمت دینار کویت:\n{price}", reply_markup=build_keyboard(context)
+        )
+    except Exception:
+        logger.exception("خطا در دریافت قیمت دینار کویت")
+        await update.message.reply_text(
+            "متاسفانه الان نتونستم قیمت دینار کویت رو بگیرم. کمی بعد دوباره تلاش کن."
+        )
+
+
+async def dinar_choice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🇮🇶 دینار عراق", callback_data="dinar_iqd"),
+            InlineKeyboardButton("🇰🇼 دینار کویت", callback_data="dinar_kwd"),
+        ]
+    ])
+    await update.message.reply_text("کدوم دینار رو می‌خوای؟", reply_markup=keyboard)
+
+
+async def dinar_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "dinar_iqd":
+        try:
+            price = fetch_iqd_price()
+            text = f"🇮🇶 قیمت دینار عراق:\n{price}"
+        except Exception:
+            logger.exception("خطا در دریافت قیمت دینار عراق")
+            text = "متاسفانه الان نتونستم قیمت رو بگیرم. کمی بعد دوباره تلاش کن."
+    elif query.data == "dinar_kwd":
+        try:
+            price = fetch_kwd_price()
+            text = f"🇰🇼 قیمت دینار کویت:\n{price}"
+        except Exception:
+            logger.exception("خطا در دریافت قیمت دینار کویت")
+            text = "متاسفانه الان نتونستم قیمت رو بگیرم. کمی بعد دوباره تلاش کن."
+    else:
+        return
+
+    await query.edit_message_text(text, reply_markup=build_keyboard(context))
+
+
 async def gold_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         text = fetch_gold_prices()
@@ -408,7 +501,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif "یورو" in text:
         await euro_command(update, context)
     elif "دینار" in text:
-        await iqd_command(update, context)
+        await dinar_choice_handler(update, context)
     elif "دلار" in text:
         await price_command(update, context)
 
@@ -419,6 +512,7 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CallbackQueryHandler(dinar_callback_handler, pattern="^dinar_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
     logger.info("بات در حال اجراست...")
