@@ -50,6 +50,7 @@ PRICETODAY_URL = "https://api.priceto.day/v1/latest/irr/usd"
 PRICETODAY_EUR_URL = "https://api.priceto.day/v1/latest/irr/eur"
 PRICETODAY_IQD_URL = "https://api.priceto.day/v1/latest/irr/iqd"
 PRICETODAY_KWD_URL = "https://api.priceto.day/v1/latest/irr/kwd"
+PRICETODAY_AED_URL = "https://api.priceto.day/v1/latest/irr/aed"
 
 # بعضی سرویس‌ها درخواست‌های بدون User-Agent مرورگر را به‌عنوان بات رد می‌کنند
 REQUEST_HEADERS = {
@@ -346,6 +347,45 @@ def fetch_kwd_price() -> str:
     raise RuntimeError(" | ".join(errors))
 
 
+def fetch_aed_price() -> str:
+    """درهم امارات به‌ازای ۱ درهم محاسبه می‌شود."""
+    errors = []
+
+    # منبع ۱: AlanChand
+    if ALANCHAND_TOKEN:
+        try:
+            resp = requests.get(ALANCHAND_URL, headers=REQUEST_HEADERS, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            price = _deep_find_currency_price(data, "aed")
+            if price:
+                return _format_price(price)
+            errors.append("alanchand: قیمت درهم در پاسخ پیدا نشد")
+        except Exception as e:
+            errors.append(f"alanchand: {e}")
+    else:
+        errors.append("alanchand: ALANCHAND_TOKEN ست نشده")
+
+    # منبع ۲ (پشتیبان): priceto.day
+    try:
+        resp = requests.get(PRICETODAY_AED_URL, headers=REQUEST_HEADERS, timeout=10)
+        resp.raise_for_status()
+        number = _try_parse_plain_number(resp.text)
+        if number is None:
+            data = resp.json()
+            if isinstance(data, (int, float)):
+                number = float(data)
+            else:
+                number = _deep_find_currency_price(data, "aed")
+        if number:
+            return _format_price(number)
+        errors.append("priceto.day: قیمت درهم در پاسخ پیدا نشد")
+    except Exception as e:
+        errors.append(f"priceto.day: {e}")
+
+    raise RuntimeError(" | ".join(errors))
+
+
 def build_keyboard(context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardMarkup:
     username = context.bot.username
     return InlineKeyboardMarkup([
@@ -384,6 +424,12 @@ def build_full_report() -> str:
         parts.append(f"🇰🇼 قیمت دینار کویت = {kwd}")
     except Exception:
         logger.exception("خطا در دریافت قیمت دینار کویت (گزارش کامل)")
+
+    try:
+        aed = fetch_aed_price()
+        parts.append(f"🇦🇪 قیمت درهم امارات = {aed}")
+    except Exception:
+        logger.exception("خطا در دریافت قیمت درهم (گزارش کامل)")
 
     if not parts:
         return "متاسفانه الان نتونستم قیمت‌ها رو بگیرم. کمی بعد دوباره تلاش کن."
@@ -447,6 +493,19 @@ async def kwd_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def aed_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        price = fetch_aed_price()
+        await update.message.reply_text(
+            f"🇦🇪 قیمت درهم امارات:\n{price}", reply_markup=build_keyboard(context)
+        )
+    except Exception:
+        logger.exception("خطا در دریافت قیمت درهم")
+        await update.message.reply_text(
+            "متاسفانه الان نتونستم قیمت درهم رو بگیرم. کمی بعد دوباره تلاش کن."
+        )
+
+
 async def dinar_choice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = InlineKeyboardMarkup([
         [
@@ -494,7 +553,7 @@ async def gold_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "سلام! برای دیدن قیمت لحظه‌ای، فقط یکی از کلمه‌های «دلار»، «یورو»، «دینار» یا «طلا» رو برام بنویس."
+        "سلام! برای دیدن قیمت لحظه‌ای، فقط یکی از کلمه‌های «دلار»، «یورو»، «دینار»، «درهم» یا «طلا» رو برام بنویس."
     )
 
 
@@ -518,6 +577,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await euro_command(update, context)
     elif "دینار" in text:
         await dinar_choice_handler(update, context)
+    elif "درهم" in text:
+        await aed_command(update, context)
     elif "دلار" in text:
         await price_command(update, context)
 
@@ -542,6 +603,7 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         ("gold", ["طلا", "gold"], "🏆 نرخ انواع طلا", fetch_gold_prices, ""),
         ("iqd", ["عراق", "iqd"], "🇮🇶 دینار عراق", fetch_iqd_price, "🇮🇶 قیمت دینار عراق:\n"),
         ("kwd", ["کویت", "kwd"], "🇰🇼 دینار کویت", fetch_kwd_price, "🇰🇼 قیمت دینار کویت:\n"),
+        ("aed", ["درهم", "aed", "امارات"], "🇦🇪 درهم امارات", fetch_aed_price, "🇦🇪 قیمت درهم امارات:\n"),
     ]
 
     matched = [
